@@ -36,6 +36,41 @@ const DEFAULT_COMPLETION_MENU: &str = r#"
   }
 }"#;
 
+const DEFAULT_IDE_COMPLETION_MENU: &str = r#"
+{
+  name: ide_completion_menu
+  only_buffer_difference: false
+  marker: "| "
+  type: {
+    layout: ide
+    min_completion_width: 0,
+    max_completion_width: 50,
+    max_completion_height: 10, # will be limited by the available lines in the terminal
+    padding: 0,
+    border: true,
+    cursor_offset: 0,
+    description_mode: "prefer_right"
+    min_description_width: 0
+    max_description_width: 50
+    max_description_height: 10
+    description_offset: 1
+    # If true, the cursor pos will be corrected, so the suggestions match up with the typed text
+    #
+    # C:\> str
+    #      str join
+    #      str trim
+    #      str split
+    correct_cursor_pos: false
+  }
+  style: {
+    text: green
+    selected_text: { attr: r }
+    description_text: yellow
+    match_text: { attr: u }
+    selected_match_text: { attr: ur }
+  }
+}"#;
+
 const DEFAULT_HISTORY_MENU: &str = r#"
 {
   name: history_menu
@@ -95,6 +130,7 @@ pub(crate) fn add_menus(
     // Checking if the default menus have been added from the config file
     let default_menus = [
         ("completion_menu", DEFAULT_COMPLETION_MENU),
+        ("ide_completion_menu", DEFAULT_IDE_COMPLETION_MENU),
         ("history_menu", DEFAULT_HISTORY_MENU),
         ("help_menu", DEFAULT_HELP_MENU),
     ];
@@ -630,6 +666,16 @@ fn add_menu_keybindings(keybindings: &mut Keybindings) {
     );
 
     keybindings.add_binding(
+        KeyModifiers::CONTROL,
+        KeyCode::Char(' '),
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("ide_completion_menu".to_string()),
+            ReedlineEvent::MenuNext,
+            ReedlineEvent::Edit(vec![EditCommand::Complete]),
+        ]),
+    );
+
+    keybindings.add_binding(
         KeyModifiers::SHIFT,
         KeyCode::BackTab,
         ReedlineEvent::MenuPrevious,
@@ -787,64 +833,76 @@ fn add_parsed_keybinding(
         }
     };
 
-    let keycode = match keybinding
+    let keycode_str = keybinding
         .keycode
         .to_expanded_string("", config)
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "backspace" => KeyCode::Backspace,
-        "enter" => KeyCode::Enter,
-        c if c.starts_with("char_") => {
-            let mut char_iter = c.chars().skip(5);
-            let pos1 = char_iter.next();
-            let pos2 = char_iter.next();
+        .to_ascii_lowercase();
 
-            let char = if let (Some(char), None) = (pos1, pos2) {
-                char
-            } else {
+    let keycode = if let Some(rest) = keycode_str.strip_prefix("char_") {
+        let error = |exp: &str, value| ShellError::UnsupportedConfigValue {
+            expected: exp.to_string(),
+            value,
+            span: keybinding.keycode.span(),
+        };
+
+        let mut char_iter = rest.chars();
+        let char = match (char_iter.next(), char_iter.next()) {
+            (Some(char), None) => char,
+            (Some('u'), Some(_)) => {
+                // This will never panic as we know there are at least two symbols
+                let Ok(code_point) = u32::from_str_radix(&rest[1..], 16) else {
+                    return Err(error("valid hex code in keycode", keycode_str));
+                };
+
+                char::from_u32(code_point).ok_or(error("valid Unicode code point", keycode_str))?
+            }
+            _ => {
+                return Err(error(
+                    "format 'char_<char>' or 'char_u<hex code>'",
+                    keycode_str,
+                ))
+            }
+        };
+
+        KeyCode::Char(char)
+    } else {
+        match keycode_str.as_str() {
+            "backspace" => KeyCode::Backspace,
+            "enter" => KeyCode::Enter,
+            "space" => KeyCode::Char(' '),
+            "down" => KeyCode::Down,
+            "up" => KeyCode::Up,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
+            "tab" => KeyCode::Tab,
+            "backtab" => KeyCode::BackTab,
+            "delete" => KeyCode::Delete,
+            "insert" => KeyCode::Insert,
+            c if c.starts_with('f') => {
+                let fn_num: u8 = c[1..]
+                    .parse()
+                    .ok()
+                    .filter(|num| matches!(num, 1..=20))
+                    .ok_or(ShellError::UnsupportedConfigValue {
+                        expected: "(f1|f2|...|f20)".to_string(),
+                        value: format!("unknown function key: {c}"),
+                        span: keybinding.keycode.span(),
+                    })?;
+                KeyCode::F(fn_num)
+            }
+            "null" => KeyCode::Null,
+            "esc" | "escape" => KeyCode::Esc,
+            _ => {
                 return Err(ShellError::UnsupportedConfigValue {
-                    expected: "char_<CHAR: unicode codepoint>".to_string(),
-                    value: c.to_string(),
+                    expected: "crossterm KeyCode".to_string(),
+                    value: keybinding.keycode.to_abbreviated_string(config),
                     span: keybinding.keycode.span(),
-                });
-            };
-
-            KeyCode::Char(char)
-        }
-        "space" => KeyCode::Char(' '),
-        "down" => KeyCode::Down,
-        "up" => KeyCode::Up,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" => KeyCode::PageUp,
-        "pagedown" => KeyCode::PageDown,
-        "tab" => KeyCode::Tab,
-        "backtab" => KeyCode::BackTab,
-        "delete" => KeyCode::Delete,
-        "insert" => KeyCode::Insert,
-        c if c.starts_with('f') => {
-            let fn_num: u8 = c[1..]
-                .parse()
-                .ok()
-                .filter(|num| matches!(num, 1..=20))
-                .ok_or(ShellError::UnsupportedConfigValue {
-                    expected: "(f1|f2|...|f20)".to_string(),
-                    value: format!("unknown function key: {c}"),
-                    span: keybinding.keycode.span(),
-                })?;
-            KeyCode::F(fn_num)
-        }
-        "null" => KeyCode::Null,
-        "esc" | "escape" => KeyCode::Esc,
-        _ => {
-            return Err(ShellError::UnsupportedConfigValue {
-                expected: "crossterm KeyCode".to_string(),
-                value: keybinding.keycode.to_abbreviated_string(config),
-                span: keybinding.keycode.span(),
-            })
+                })
+            }
         }
     };
     if let Some(event) = parse_event(&keybinding.event, config)? {
